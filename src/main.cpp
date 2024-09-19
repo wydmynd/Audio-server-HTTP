@@ -70,49 +70,106 @@ void handleUpload(AsyncWebServerRequest *request, String filename, size_t index,
 }
 
 
+struct WAVHeader {
+    uint32_t sampleRate;
+    uint16_t numChannels;
+    uint16_t bitsPerSample;
+};
+
+bool readWAVHeader(File &file, WAVHeader &header) {
+    char buffer[44];
+    if (file.read((uint8_t*)buffer, 44) != 44) {
+        return false;
+    }
+
+    // Check RIFF header
+    if (strncmp(buffer, "RIFF", 4) != 0 || strncmp(buffer + 8, "WAVE", 4) != 0) {
+        return false;
+    }
+
+    // Extract relevant information
+    header.sampleRate = *((uint32_t*)(buffer + 24));
+    header.numChannels = *((uint16_t*)(buffer + 22));
+    header.bitsPerSample = *((uint16_t*)(buffer + 34));
+
+    return true;
+}
+
+void configureI2S(const WAVHeader &header) {
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+        .sample_rate = header.sampleRate,
+        .bits_per_sample = (i2s_bits_per_sample_t)header.bitsPerSample,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 64,
+        .use_apll = false,
+        .tx_desc_auto_clear = true,
+        .fixed_mclk = 0
+    };
+
+    i2s_driver_uninstall(I2S_NUM_0);
+    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    i2s_set_pin(I2S_NUM_0, &pin_config);
+}
 
 void playWavFileTask(void *param) {
-  const char* filename = (const char*)param;
-  
-  if (xSemaphoreTake(audioMutex, portMAX_DELAY) == pdTRUE) {
-    File file = LittleFS.open(filename, "r");
-    if (!file) {
-      Serial.println("Failed to open file for reading");
-      xSemaphoreGive(audioMutex);
-      vTaskDelete(NULL);
-      return;
-    }
-
-    // Skip WAV header
-    file.seek(44);
-
-    char buffer[1024];
-    size_t bytesRead;
-
-    while ((bytesRead = file.read((uint8_t*)buffer, sizeof(buffer))) > 0) {
-      size_t bytesWritten = 0;
-      while (bytesWritten < bytesRead) {
-        size_t written = 0;
-        esp_err_t result = i2s_write(I2S_NUM_0, (const char *)(buffer + bytesWritten), (bytesRead - bytesWritten), &written, portMAX_DELAY);
-        if (result == ESP_OK) {
-          bytesWritten += written;
-        } else {
-          Serial.printf("I2S write error: %d\n", result);
-          vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        taskYIELD();
-      }
-    }
-
-    file.close();
-    i2s_zero_dma_buffer(I2S_NUM_0);
-    Serial.println("Playback finished");
+    const char* filename = (const char*)param;
     
-    xSemaphoreGive(audioMutex);
-  }
-  
-  playbackTaskHandle = NULL;
-  vTaskDelete(NULL);
+    if (xSemaphoreTake(audioMutex, portMAX_DELAY) == pdTRUE) {
+        File file = LittleFS.open(filename, "r");
+        if (!file) {
+            Serial.println("Failed to open file for reading");
+            xSemaphoreGive(audioMutex);
+            vTaskDelete(NULL);
+            return;
+        }
+
+        WAVHeader wavHeader;
+        if (!readWAVHeader(file, wavHeader)) {
+            Serial.println("Invalid WAV file");
+            file.close();
+            xSemaphoreGive(audioMutex);
+            vTaskDelete(NULL);
+            return;
+        }
+
+        Serial.printf("WAV File: Sample Rate: %u, Channels: %u, Bits Per Sample: %u\n", 
+                      wavHeader.sampleRate, wavHeader.numChannels, wavHeader.bitsPerSample);
+
+        configureI2S(wavHeader);
+
+        const size_t bufferSize = 1024;
+        char buffer[bufferSize];
+        size_t bytesRead;
+
+        while ((bytesRead = file.read((uint8_t*)buffer, bufferSize)) > 0) {
+            size_t bytesWritten = 0;
+            while (bytesWritten < bytesRead) {
+                size_t written = 0;
+                esp_err_t result = i2s_write(I2S_NUM_0, (const char *)(buffer + bytesWritten), 
+                                             bytesRead - bytesWritten, &written, portMAX_DELAY);
+                if (result == ESP_OK) {
+                    bytesWritten += written;
+                } else {
+                    Serial.printf("I2S write error: %d\n", result);
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+                taskYIELD();
+            }
+        }
+
+        file.close();
+        i2s_zero_dma_buffer(I2S_NUM_0);
+        Serial.println("Playback finished");
+        
+        xSemaphoreGive(audioMutex);
+    }
+    
+    playbackTaskHandle = NULL;
+    vTaskDelete(NULL);
 }
 
 void handlePlayRequest(AsyncWebServerRequest *request) {
