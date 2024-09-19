@@ -1,23 +1,136 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ESP32 Audio Player</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+        }
+        #upload-form {
+            margin-bottom: 20px;
+        }
+        #play-button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+        #play-button.idle {
+            background-color: #4CAF50;
+            color: white;
+        }
+        #play-button.playing {
+            background-color: #f44336;
+            color: white;
+        }
+        #play-button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 20px;
+            font-weight: bold;
+        }
+    </style>
 </head>
 <body>
     <h1>ESP32 Audio Player</h1>
-    <form method="post" enctype="multipart/form-data" action="/upload">
-        <input type="file" name="file" accept=".wav">
+    <form id="upload-form" method="post" enctype="multipart/form-data" action="/upload">
+        <input type="file" name="file" accept=".wav" required>
         <input type="submit" value="Upload">
     </form>
-    <br>
-    <button onclick="playAudio()">Play Audio</button>
+    <button id="play-button" onclick="playAudio()" class="idle">Play Audio</button>
+    <div id="status"></div>
 
     <script>
-        function playAudio() {
-            fetch('/play')
-                .then(response => response.text())
-                .then(data => alert(data));
+        const playButton = document.getElementById('play-button');
+        const statusDiv = document.getElementById('status');
+        let isPlaying = false;
+
+        function updateButtonState() {
+            if (isPlaying) {
+                playButton.textContent = 'Playing...';
+                playButton.classList.remove('idle');
+                playButton.classList.add('playing');
+                playButton.disabled = true;
+                statusDiv.textContent = 'Status: Playing';
+            } else {
+                playButton.textContent = 'Play Audio';
+                playButton.classList.remove('playing');
+                playButton.classList.add('idle');
+                playButton.disabled = false;
+                statusDiv.textContent = 'Status: Idle';
+            }
         }
+
+        function checkPlaybackStatus() {
+    fetch('/status')
+        .then(response => response.text())
+        .then(status => {
+            if (status === 'idle') {
+                isPlaying = false;
+                updateButtonState();
+            } else {
+                setTimeout(checkPlaybackStatus, 1000); // Check again in 1 second
+            }
+        })
+        .catch(error => {
+            console.error('Error checking status:', error);
+            isPlaying = false;
+            updateButtonState();
+        });
+}
+
+        function playAudio() {
+    if (!isPlaying) {
+        isPlaying = true;
+        updateButtonState();
+        fetch('/play')
+            .then(response => response.text())
+            .then(data => {
+                console.log(data);
+                checkPlaybackStatus(); // Start checking playback status
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                isPlaying = false;
+                updateButtonState();
+            });
+    }
+}
+
+        // Initialize button state
+        updateButtonState();
+
+        // Handle form submission
+        document.getElementById('upload-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            fetch('/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(data => {
+                console.log(data);
+                alert('File uploaded successfully!');
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error uploading file.');
+            });
+        });
     </script>
 </body>
 </html>

@@ -213,6 +213,14 @@ void setup() {
 
   server.on("/play", HTTP_GET, handlePlayRequest);
 
+  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (playbackTaskHandle == NULL) {
+        request->send(200, "text/plain", "idle");
+    } else {
+        request->send(200, "text/plain", "playing");
+    }
+  });
+  
   server.begin();
   Serial.println("Server started");
 }
