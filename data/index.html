@@ -49,6 +49,7 @@
     <form id="upload-form" method="post" enctype="multipart/form-data" action="/upload">
         <input type="file" name="file" accept=".wav" required>
         <input type="submit" value="Upload">
+        <div style="font-size: small; margin-top: 5px;">Select a .wav file, max size about 1MB</div>
     </form>
     <button id="play-button" onclick="playAudio()" class="idle">Play Audio</button>
     <div id="status"></div>
