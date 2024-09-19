@@ -20,6 +20,10 @@ AsyncWebServer server(80);
 // File upload name
 const char* UPLOAD_FILE_NAME = "/uploaded.wav";
 
+TaskHandle_t playbackTaskHandle = NULL;
+SemaphoreHandle_t audioMutex = NULL;
+
+
 // I2S configuration
 i2s_config_t i2s_config = {
   .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
@@ -69,69 +73,65 @@ void handleUpload(AsyncWebServerRequest *request, String filename, size_t index,
 
 void playWavFileTask(void *param) {
   const char* filename = (const char*)param;
-  File file = LittleFS.open(filename, "r");
-  unsigned int buff_counter = 0;
-  if(!file){
-    Serial.println("Failed to open file for reading");
-    server.begin(); // Restart the server
-    vTaskDelete(NULL); // Delete the task
-    return;
-  }
-
-  // Skip WAV header
-  file.seek(44);
-
-  // Buffer for I2S data
-  char buffer[1024];  // Declare buffer as char
-  size_t bytesRead;
-
-  while ((bytesRead = file.read((uint8_t*)buffer, sizeof(buffer))) > 0) { // Cast buffer to uint8_t*
-    size_t bytesWritten = 0;
-    while (bytesWritten < bytesRead) {
-      size_t written = 0;
-      esp_err_t result = i2s_write(I2S_NUM_0, (const char *)(buffer + bytesWritten), (bytesRead - bytesWritten), &written, pdMS_TO_TICKS(100)); // Use a timeout
-      if (result == ESP_OK) {
-        bytesWritten += written;
-      } else {
-        Serial.printf("I2S write error: %d\n", result);
-        vTaskDelay(pdMS_TO_TICKS(10)); // Add a delay if there is an error
-      }
-      vTaskDelay(pdMS_TO_TICKS(1)); // Add a small delay to prevent the task watchdog from triggering
-      yield(); // Allow the system to perform background tasks and reset the watchdog timer
-      Serial.printf("cnt: %u, br: %u, bw: %u bwt: %u\n", buff_counter, bytesRead, written, bytesWritten); // print bytes read, bytes written, total bytes written
-      buff_counter++;
-    }
-  }
-
-  file.close();
-
-  // Flush the remaining data in the I2S buffer
-  i2s_zero_dma_buffer(I2S_NUM_0);
-
-  Serial.println("Playback finished");
   
-  server.begin(); // Restart the server
-  delay(50); // Delay to allow the server to start
-  vTaskDelete(NULL); // Delete the task
+  if (xSemaphoreTake(audioMutex, portMAX_DELAY) == pdTRUE) {
+    File file = LittleFS.open(filename, "r");
+    if (!file) {
+      Serial.println("Failed to open file for reading");
+      xSemaphoreGive(audioMutex);
+      vTaskDelete(NULL);
+      return;
+    }
+
+    // Skip WAV header
+    file.seek(44);
+
+    char buffer[1024];
+    size_t bytesRead;
+
+    while ((bytesRead = file.read((uint8_t*)buffer, sizeof(buffer))) > 0) {
+      size_t bytesWritten = 0;
+      while (bytesWritten < bytesRead) {
+        size_t written = 0;
+        esp_err_t result = i2s_write(I2S_NUM_0, (const char *)(buffer + bytesWritten), (bytesRead - bytesWritten), &written, portMAX_DELAY);
+        if (result == ESP_OK) {
+          bytesWritten += written;
+        } else {
+          Serial.printf("I2S write error: %d\n", result);
+          vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        taskYIELD();
+      }
+    }
+
+    file.close();
+    i2s_zero_dma_buffer(I2S_NUM_0);
+    Serial.println("Playback finished");
+    
+    xSemaphoreGive(audioMutex);
+  }
+  
+  playbackTaskHandle = NULL;
+  vTaskDelete(NULL);
 }
 
-void playWavFile(const char* filename) {
-  server.end(); // Stop the server to prevent new connections while playing audio
-  delay(50); // Delay to allow the server to stop
-  xTaskCreate(playWavFileTask, "playWavFileTask", 8192, (void*)filename, 1, NULL);
+void handlePlayRequest(AsyncWebServerRequest *request) {
+  if (playbackTaskHandle == NULL) {
+    xTaskCreate(playWavFileTask, "playWavFileTask", 8192, (void*)UPLOAD_FILE_NAME, 1, &playbackTaskHandle);
+    request->send(200, "text/plain", "Starting playback");
+  } else {
+    request->send(409, "text/plain", "Playback already in progress");
+  }
 }
-
 
 void setup() {
   Serial.begin(115200);
 
-  // Initialize LittleFS
-  if(!LittleFS.begin(true)){
+  if (!LittleFS.begin(true)) {
     Serial.println("An error has occurred while mounting LittleFS");
     return;
   }
 
-  // Connect to Wi-Fi
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
@@ -141,28 +141,26 @@ void setup() {
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
 
-  // Initialize I2S
   i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
   i2s_set_pin(I2S_NUM_0, &pin_config);
 
-  // Set up web server routes
+  audioMutex = xSemaphoreCreateMutex();
+
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(LittleFS, "/index.html", "text/html");
+    request->send(LittleFS.open("/index.html", "r"), "/index.html", "text/html");
   });
 
   server.on("/upload", HTTP_POST, [](AsyncWebServerRequest *request){
     request->send(200);
   }, handleUpload);
 
-  server.on("/play", HTTP_GET, [](AsyncWebServerRequest *request){
-    playWavFile(UPLOAD_FILE_NAME);
-    // request->send(200, "text/plain", "Playing audio");
-  });
+  server.on("/play", HTTP_GET, handlePlayRequest);
 
-  // Start server
   server.begin();
+  Serial.println("Server started");
 }
 
 void loop() {
-  // Main loop is empty as we're using async web server
+  // The main loop can be used for other tasks or left empty
+  delay(100);
 }
